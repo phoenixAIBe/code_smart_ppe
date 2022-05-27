@@ -1,0 +1,10 @@
+{
+  "parameters": {
+    "trigger": "center",
+    "duration": 60
+  },
+  "infos": {
+    "first_available_timestamp": null
+  },
+  "videos": []
+}
