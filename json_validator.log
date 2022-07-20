@@ -1,0 +1,6 @@
+Updating json file
+usage: json validate [-h] [--document-json <doc> | --document-file <doc>]
+                     [--schema-json <schema> | --schema-file <schema>]
+                     [--indent <indentation>]
+json validate: error: argument --document-json: invalid JSONStruct value: '{ ]}'
+Failed to parse JSON

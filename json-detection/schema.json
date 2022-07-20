@@ -1,0 +1,1 @@
+{"logs" : [{ "uuid": "xxx", "date": "yyy", "location": "zzz", "medias": [ { "type": "Video", "fileSize": 62885007, "fileExtension": "mp4", "checkSum": "1e98f0a3fc7d5a8757eb9813c61a527a" }, { "type": "Image", "fileExtension": "jpg" } ] } ]}

@@ -1,7 +1,7 @@
 {
   "parameters": {
-    "trigger": "center",
-    "duration": 60
+    "before_event": 90,
+    "after_event": 90
   },
   "infos": {
     "first_available_timestamp": null

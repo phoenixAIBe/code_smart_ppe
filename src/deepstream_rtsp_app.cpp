@@ -80,7 +80,7 @@ namespace fs = std::filesystem;
 
 #define DROP_FRAME_INTERVAL 8
 
-#define PGIE_DETECTED_CLASS_NUM 2
+#define SGIE_DETECTED_CLASS_NUM 2
 #define MAX_SINK_BINS (1024)
 #define MAX_INSTANCES 128
 #define MAX_DISPLAY_LEN 64
@@ -123,22 +123,19 @@ string location_url = std::getenv("LOCATION_URL");
 string MAPPING= std::getenv("RTSP_OUT_MAPPING");
 /*-----------------------------------------------------------------------*/
 /*-----------------------OUTPUT STREAM------------------------------------*/
-//int MUXER_OUTPUT_WIDTH = std::stoi(std::getenv("OUTPUT_WIDTH"));
-//int MUXER_OUTPUT_HEIGHT = std::stoi(std::getenv("OUTPUT_HIGHT"));
-//int TILED_OUTPUT_WIDTH = std::stoi(std::getenv("OUTPUT_WIDTH"));
-//int TILED_OUTPUT_HEIGHT = std::stoi(std::getenv("OUTPUT_HIGHT"));
-int MUXER_OUTPUT_WIDTH = 1280;
-int MUXER_OUTPUT_HEIGHT = 720;
-int TILED_OUTPUT_WIDTH = 1280;
-int TILED_OUTPUT_HEIGHT = 720;
+int MUXER_OUTPUT_WIDTH = std::stoi(std::getenv("OUTPUT_WIDTH"));
+int MUXER_OUTPUT_HEIGHT = std::stoi(std::getenv("OUTPUT_HIGHT"));
+int TILED_OUTPUT_WIDTH = std::stoi(std::getenv("OUTPUT_WIDTH"));
+int TILED_OUTPUT_HEIGHT = std::stoi(std::getenv("OUTPUT_HIGHT"));
+
 /*-----------------------------------------------------------------------*/
 /*-----------------------Variables---------------------------------------*/
 AppCtx *appCtx[MAX_INSTANCES];
 GMainLoop *loop = NULL;
 
-const gchar pgie_classes_str[PGIE_DETECTED_CLASS_NUM][32] =
+const gchar sgie_classes_str[SGIE_DETECTED_CLASS_NUM][32] =
     { "helmet", 
-      "vest",
+      "vest"
     };
 
 unsigned int nvds_lib_major_version = NVDS_VERSION_MAJOR;
@@ -164,11 +161,15 @@ int token_expires_at;
 int alert_thresh = 50 / (DROP_FRAME_INTERVAL + 1);
 int initial_life= 50 / (DROP_FRAME_INTERVAL + 1); //Number of frames that we wait to see similar object
 int video_duration;
+int before_event;
+int after_event;
 int start_video, end_video; //Start recording of total video file
 int video_segment_duration = 300; //15 min
 int n_MB = 5;
 int display_obj_sec = 0;
 int offset_tz;
+int start_date_license;
+int end_date_license;
 long int obj_alert_lifetime = 180; // After 100 seconds, alert is sent
 long int obj_lifetime = 30; // Number of seconds we wait to see similar object -> if it doesn't happen ; object is killed 
 long int garbage_lifetime = 10800; // Number of seconds we wait before killing detected garbage (vehicle occlusion, ...)
@@ -179,20 +180,21 @@ double ratio_height;
 double mux_out_width = MUXER_OUTPUT_WIDTH;
 double mux_out_height = MUXER_OUTPUT_HEIGHT;
 
-
-
-string recording_file_name, next_recording_file_name;
 string rtsp_in;
 string webdav_url = "192.168.40.40:8081/alerts/";
 string api_token;
 string video_id;
-string trigger;
+//string trigger;
 string time_zone;
+string license_owner;
 
 static gboolean install_mux_eosmonitor_probe = FALSE;
 bool timer_updateInfos = true;
 bool video_sender = false;
 bool rtsp_lost = true; // if rtsp is lost, we have to check if resolution is still the same
+bool first_json_object = true;
+bool model_license;
+bool licensed;
 
 json access_token;
 json params;
@@ -204,6 +206,32 @@ auto info_logger = spdlog::rotating_logger_mt("App Info", "/phoenix/logs/info.lo
 auto debug_logger = spdlog::rotating_logger_mt("App Debug", "/phoenix/logs/debug.log", max_size, max_files);
 
 /*-----------------------------------------------------------------------*/
+
+// get value from system command
+std::string exec(const char* cmd) {
+    char buffer[128];
+    std::string result = "";
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) throw std::runtime_error("popen() failed!");
+    try {
+        while (fgets(buffer, sizeof buffer, pipe) != NULL) {
+            result += buffer;
+        }
+    } catch (...) {
+        pclose(pipe);
+        throw;
+    }
+    pclose(pipe);
+    return result;
+}
+
+void verify_license(bool &model_license, int &start_date_license, int &end_date_license, string &license_owner){
+  license_owner = exec("stat -c '%U' /phoenix/license/license_decrypted.txt");
+  license_owner.erase(std::remove(license_owner.begin(), license_owner.end(), '\n'), license_owner.end());
+  istringstream(exec("echo $(sed -e '1,/-----END PGP MESSAGE-----/ d' /phoenix/license/license_decrypted.txt) | jq .models_licensed.smart_waste")) >> std::boolalpha >> model_license; // string to bool
+  start_date_license = stoi(exec("echo $(sed -e '1,/-----END PGP MESSAGE-----/ d' /phoenix/license/license_decrypted.txt) | jq .start_date"));
+  end_date_license = stoi(exec("echo $(sed -e '1,/-----END PGP MESSAGE-----/ d' /phoenix/license/license_decrypted.txt) | jq .end_date"));
+}
 
 bool cmp(pair<string, int>& a,
          pair<string, int>& b)
@@ -265,32 +293,17 @@ double calc_fps()
   return current_fps;
 }
 
-// get value from system command
-std::string exec(const char* cmd) {
-    char buffer[128];
-    std::string result = "";
-    FILE* pipe = popen(cmd, "r");
-    if (!pipe) throw std::runtime_error("popen() failed!");
-    try {
-        while (fgets(buffer, sizeof buffer, pipe) != NULL) {
-            result += buffer;
-        }
-    } catch (...) {
-        pclose(pipe);
-        throw;
-    }
-    pclose(pipe);
-    return result;
-}
 
 void getParams()
 {
   ifstream i("./parameters.json");
   i >> params;
 
-  trigger = params["parameters"]["trigger"];
-  std::transform(trigger.begin(), trigger.end(), trigger.begin(), [](unsigned char c){ return std::tolower(c); });
-  video_duration = params["parameters"]["duration"];
+  //trigger = params["parameters"]["trigger"];
+  //std::transform(trigger.begin(), trigger.end(), trigger.begin(), [](unsigned char c){ return std::tolower(c); });
+  before_event = params["parameters"]["before_event"];
+  after_event = params["parameters"]["after_event"];
+  video_duration = before_event + after_event;
 }
 
 
@@ -375,6 +388,7 @@ void sendAlert(int top, int left, int width,  int height)
   time(&now_time_t);
   long int now = static_cast<long int> (now_time_t);
 
+  string recording_file_name, next_recording_file_name;
   string list_name;
 
   string uuid = exec("uuidgen"); 
@@ -391,8 +405,11 @@ void sendAlert(int top, int left, int width,  int height)
 
   int begin_recording, end_recording, sleep_time;
 
+  begin_recording = now - before_event - obj_alert_lifetime;
+  end_recording = now + after_event - obj_alert_lifetime;
+  sleep_time = after_event + 10;
 
-  if(trigger=="beginning")
+  /*if(trigger=="beginning")
   {
     begin_recording = now - obj_alert_lifetime;
     end_recording = now + video_duration - obj_alert_lifetime;
@@ -408,8 +425,7 @@ void sendAlert(int top, int left, int width,  int height)
     begin_recording = now - video_duration/2 - obj_alert_lifetime;
     end_recording = now + video_duration/2 - obj_alert_lifetime;
     sleep_time = video_duration/2 + 10;
-  }
-
+  }*/
 
   sleep(sleep_time); //Record enough before cutting the video
 
@@ -468,8 +484,6 @@ void sendAlert(int top, int left, int width,  int height)
         //cout << "Video containing recording is: " << elem.first << endl;
         info_logger->info("Video containing recording is: " + elem.first);
 
-        info_logger->info("HERE0");
-
         recording_file_name = elem.first;
         start_video = elem.second;
         //break; //Take the oldest one that meets the criterion
@@ -479,8 +493,6 @@ void sendAlert(int top, int left, int width,  int height)
         //cout << "End recording: " << end_recording << endl;
         //cout << "End video: " << end_video << endl;
 
-        info_logger->info("HERE1");
-
         if(end_recording < end_video)
         {
           break; //The video is found
@@ -489,7 +501,6 @@ void sendAlert(int top, int left, int width,  int height)
         {
           if(count>0) //Not the newest video --> take current video and next one in time
           {
-            info_logger->info("HERE2");
             //cout << "!!!!!!!!!!!We will concatenate two videos !!" << endl;
             ofstream myfile;
             list_name = uuid + ".txt";
@@ -505,8 +516,6 @@ void sendAlert(int top, int left, int width,  int height)
             string command;
             command.append("ffmpeg -f concat -safe 0 -i " + list_name + " -c copy " + uuid + ".ts");
             system(command.c_str());
-
-            info_logger->info("HERE3");
 
             recording_file_name = uuid + ".ts";
             break;
@@ -532,8 +541,6 @@ void sendAlert(int top, int left, int width,  int height)
   //cout << "Start recording at: " << begin_recording << endl;
   //cout << "End recording at: " << end_recording << endl;
   //cout << "=====================================================" << endl;
-
-  info_logger->info("HERE4");
 
   // 1. Record video
   int relative_begin = begin_recording - start_video;
@@ -569,9 +576,6 @@ void sendAlert(int top, int left, int width,  int height)
     remove(list_name.c_str());
   }
 
-  info_logger->info("HERE5");
-
-  
   // Envoi de la miniature de l'alerte
 
   string thumbnail_name = "alert_" + uuid  + ".jpg";
@@ -657,7 +661,6 @@ void sendAlert(int top, int left, int width,  int height)
 
   // Create json alert
   json alert;
-  json send_alert_result;
 
   char buf[sizeof "2011-10-08T07:07:09Z"];
   strftime(buf, sizeof buf, "%FT%TZ", gmtime(&now_time_t));
@@ -672,18 +675,36 @@ void sendAlert(int top, int left, int width,  int height)
 
   int chunkSize = n_MB*1048576;
 
-  alert["externalId"] = uuid; //timestamp begin recording is alert ID
+  alert["uuid"] = uuid; //timestamp begin recording is alert ID
   //alert["externalId"] = "alert_" + to_string(begin_recording) + "_" + uuid;
   alert["date"] = buf;
   alert["location"] = latitude + "," + longitude;
-  alert["status"] = nullptr; // to define later
-  alert["medias"][0]["externalId"] = uuid; //same id because only one media
+  //alert["status"] = nullptr; // to define later
+  //alert["medias"][0]["externalId"] = uuid; //same id because only one media
   //alert["medias"][0]["externalId"] = "alert_" + to_string(begin_recording) + "_" + uuid;
   alert["medias"][0]["type"] = "Video";
-  alert["medias"][0]["uploadSession"]["fileSize"] = file_size_bytes;
-  alert["medias"][0]["uploadSession"]["fileExtension"] = "mp4";
-  alert["medias"][0]["uploadSession"]["checkSum"] = md5_sum;
-  alert["medias"][0]["uploadSession"]["chunkSize"] = chunkSize; // 1 Byte
+  alert["medias"][0]["fileSize"] = file_size_bytes;
+  alert["medias"][0]["fileExtension"] = "mp4";
+  alert["medias"][0]["checkSum"] = md5_sum;
+  //alert["medias"][0]["uploadSession"]["chunkSize"] = chunkSize; // 1 Byte
+  alert["medias"][1]["type"] = "Image";
+  alert["medias"][1]["fileExtension"] = "jpg";
+
+  
+
+  if(first_json_object)
+  {
+    std::ofstream o("json-detection/detection_results.json");
+    o << "\"logs\" : [";
+    o << std::setw(4) << alert;
+    first_json_object = false;
+  }
+  else
+  {
+    std::ofstream o("json-detection/detection_results.json", std::ofstream::app);
+    o << "," << std::endl;
+    o << std::setw(4) << alert;
+  }
 
   string alert_to_send = alert.dump();
 
@@ -728,10 +749,8 @@ void checkInputStreamResol(){
   command_resol_height.append(rtsp_in);
   command_resol_height.append("' 2>&1 | grep Video: | grep -Po '\\d{3,5}x\\d{3,5}' | cut -d'x' -f2");
 
-  //string resol_width = exec(command_resol_width.c_str());
-  //string resol_height = exec(command_resol_height.c_str());
-  string resol_width = "1280";
-  string resol_height = "720";
+  string resol_width = exec(command_resol_width.c_str());
+  string resol_height = exec(command_resol_height.c_str());
   resol_width.erase(std::remove(resol_width.begin(), resol_width.end(), '\n'), resol_width.end());
   resol_height.erase(std::remove(resol_height.begin(), resol_height.end(), '\n'), resol_height.end());
   
@@ -766,6 +785,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
   NvDsMetaList *l_frame = NULL;
   NvDsMetaList *l_obj = NULL;
   NvDsMetaList *l_cls = NULL;
+  NvDsDisplayMeta *display_meta = NULL;
   NvDsDisplayMeta *display_meta3 = NULL;
   NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buf);
 
@@ -777,9 +797,19 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
     rtsp_lost = false;
   }
 
+  // check license
+  /*std::time_t now = std::time(0);
+
+  if(now <= end_date_license && now >= start_date_license && model_license && license_owner == "www-data")
+  {
+    licensed=true;
+  }
+  if(now >= end_date_license || now <= start_date_license || !model_license || license_owner != "www-data")
+  {
+    licensed=false;
+  }*/
 
 
-  // Check if token still valid
   if(frame_number%100 == 0)
   {
     // 2. Retrieve params from JSON
@@ -792,11 +822,16 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
   {
     NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
     int offset = 0;
+
+
+
     for (l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) 
     {
       obj_meta = (NvDsObjectMeta *) (l_obj->data);
+
       display_meta3 = nvds_acquire_display_meta_from_pool (batch_meta);
       NvOSD_TextParams *txt_params3 = &display_meta3->text_params[0];
+
       for (l_cls = obj_meta->classifier_meta_list; l_cls != NULL; l_cls = l_cls->next) 
       {
         NvDsClassifierMeta *cls_meta = (NvDsClassifierMeta *) (l_cls->data);
@@ -871,9 +906,9 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
               cout << "INFO : DISPLAYING EXISTING OBJECTS : " << endl;
               for (int j=0; j < objects_init_life.size(); j++){
                 string x_center = to_string(int((lefts[j] + (widths[j]/2)) * ratio_width));
-                string y_center = to_string(int((tops[j] - (heights[j] / 2)) * ratio_height));
-                info_logger->info("OBJET " + to_string(j) + " -> center = (" + x_center + ";" + y_center + ") -> temps d'existance : " + to_string(time(NULL) - objects_init_life[j]));          
-                cout << "OBJET " << j << " -> temps d'existance : " << time(NULL) - objects_init_life[j] << endl;
+                string y_center = to_string(int((tops[j] + (heights[j] / 2)) * ratio_height));
+                info_logger->info("OBJET " + to_string(j) + " -> center = (" + x_center + ";" + y_center + ") -> temps d'existence : " + to_string(time(NULL) - objects_init_life[j]));          
+                cout << "OBJET " << j << " -> temps d'existence : " << time(NULL) - objects_init_life[j] << endl;
                 display_obj_sec = time(NULL);
               }
             }
@@ -902,7 +937,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
               if(time(NULL) - objects_life[j] >= obj_lifetime && !alerts[j]) //end of live for elements that haven't been seen since obj_lifetime
               {
                 string x_center = to_string(int((lefts[j] + (widths[j]/2)) * ratio_width));
-                string y_center = to_string(int((tops[j] - (heights[j] / 2)) * ratio_height));
+                string y_center = to_string(int((tops[j] + (heights[j] / 2)) * ratio_height));
                 info_logger->info("ERASING OBJECT -> center = (" + x_center + ";" + y_center + ")");
                 cout << "ERASING OBJECT" << endl;
                 counts.erase(counts.begin() + j);
@@ -1024,7 +1059,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
           txt_params3->display_text = (gchar *) g_malloc0 (MAX_DISPLAY_LEN);
 
 
-          snprintf(result_0, 32, "%s ", pgie_classes_str[obj_meta->class_id]);
+          snprintf(result_0, 32, "%s ", sgie_classes_str[obj_meta->class_id]);
           snprintf(result_1, 32, "%.0f％", confidence * 100);
 
 
@@ -1059,12 +1094,41 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data
 
       nvds_add_display_meta_to_frame (frame_meta, display_meta3);
 
+
     }
-    // if (num_rects > 0) {
-    //   g_print ("Frame Number = %d Number of objects = %d "
-    //       "ID_0: %d ID_1: %d ID_2: %d ID_3: %d \n",
-    //       frame_meta->frame_num, num_rects, count_0, count_1, count_2, count_3);  
-    // }
+
+    /*
+    //Display information on the frame
+    //We use previous frame to define crossing state so we show information of the previous frame
+    //What we see is what is used to take decisions (coherent)
+    display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
+    NvOSD_TextParams *txt_params = &display_meta->text_params[0];
+    display_meta->num_labels = 1;
+    txt_params->display_text = (char*)g_malloc0(MAX_DISPLAY_LEN);  //c++ adapted
+
+    if (!licensed) 
+    {
+      offset = snprintf(txt_params->display_text, MAX_DISPLAY_LEN, "%s\n", "\nInvalid or expired license\n");
+      txt_params->set_bg_clr = 1;
+      txt_params->text_bg_clr.red = 1.0;
+      txt_params->text_bg_clr.green = 0.0;
+      txt_params->text_bg_clr.blue = 0.0;
+      txt_params->text_bg_clr.alpha = 0.6;
+      txt_params->font_params.font_name = "Serif";
+      txt_params->font_params.font_size = 44;
+      txt_params->font_params.font_color.red = 1.0;
+      txt_params->font_params.font_color.green = 1.0;
+      txt_params->font_params.font_color.blue = 1.0;
+      txt_params->font_params.font_color.alpha = 1.0;
+      txt_params->x_offset = 0.0 * MUXER_OUTPUT_WIDTH;
+      txt_params->y_offset = 0.0 * MUXER_OUTPUT_HEIGHT;
+    }
+
+
+    nvds_add_display_meta_to_frame(frame_meta, display_meta);
+    */
+
+
   }
   //string fps_show_env=std::getenv("SHOW_FPS");
   string fps_show_env="NO";
@@ -2052,6 +2116,7 @@ int main (int argc, char *argv[])
   debug_logger->set_level(spdlog::level::debug);
   debug_logger->flush_on(spdlog::level::debug);
 
+  // Time and offset
   time_t t = time(NULL);
   struct tm lt = {0};
   localtime_r(&t, &lt);
@@ -2060,6 +2125,11 @@ int main (int argc, char *argv[])
   offset_tz = lt.tm_gmtoff / 3600;
   info_logger->info("Time offset : " + to_string(offset_tz));
   
+  // License checking
+  //verify_license(model_license, start_date_license, end_date_license, license_owner);
+
+
+
   #if (defined TRACKER && defined ANALYTICS)
   GstElement *streammux = NULL, 
               *sink = NULL, 
@@ -2337,6 +2407,7 @@ done:
   g_object_set (G_OBJECT (tiler), "rows", tiler_rows, "columns", tiler_columns,
       "width", TILED_OUTPUT_WIDTH, "height", TILED_OUTPUT_HEIGHT, NULL);
   #if (defined TRACKER && defined ANALYTICS)
+    info_logger->info("Pipeline 1");
     gst_bin_add_many (GST_BIN (pipeline->pipeline),
         pipeline->multi_src_bin.bin, 
         pipeline->multi_src_bin.streammux,
@@ -2378,12 +2449,12 @@ done:
     }
   #else
   #if (defined TRACKER)
-   cout << "here" << endl;
+    info_logger->info("Pipeline 2");
     gst_bin_add_many (GST_BIN (pipeline->pipeline),
         pipeline->multi_src_bin.bin, 
         pipeline->multi_src_bin.streammux,
         queue1,
-        pgie,
+        //pgie,
         nvtracker,
         sgie1,
         queue2,
@@ -2398,7 +2469,7 @@ done:
         NULL);
     if (!gst_element_link_many (pipeline->multi_src_bin.bin, 
                                 queue1,
-                                pgie, 
+                                //pgie, 
                                 nvtracker, 
                                 sgie1,
                                 queue2, 
@@ -2417,6 +2488,7 @@ done:
     }
   #else
   #if (defined ANALYTICS)
+    info_logger->info("Pipeline 3");
     gst_bin_add_many (GST_BIN (pipeline->pipeline),
           pipeline->multi_src_bin.bin, 
           pipeline->multi_src_bin.streammux,
@@ -2455,6 +2527,7 @@ done:
       return -1;
     }
   #else
+    info_logger->info("Pipeline 4");
     gst_bin_add_many (GST_BIN (pipeline->pipeline),
         pipeline->multi_src_bin.bin, 
         pipeline->multi_src_bin.streammux,
@@ -2598,5 +2671,4 @@ done:
 
   return 0;
 }
-
 

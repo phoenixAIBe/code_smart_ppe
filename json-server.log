@@ -1,0 +1,16 @@
+
+  \{^_^}/ hi!
+
+  Loading /opt/nvidia/deepstream/deepstream-5.0/sources/apps/sample_apps/smart_ppe/json-detection/json_to_stream.json
+  Done
+
+  Resources
+
+  Home
+  http://0.0.0.0:2000
+
+  Type s + enter at any time to create a snapshot of the database
+  Watching...
+
+[0mGET /__rules [33m404[0m 9.076 ms - 2[0m
+[0mGET /db [36m304[0m 1.659 ms - -[0m
